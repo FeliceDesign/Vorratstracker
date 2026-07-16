@@ -370,6 +370,9 @@ export default function VorratApp() {
   const scanSupported = isScanSupported();
   const [scanBusy, setScanBusy] = useState(false);
   const [scanMsg, setScanMsg] = useState('');
+  const [showBatch, setShowBatch] = useState(false);
+  const [batchItems, setBatchItems] = useState([]); // gesammelte Scans vor dem Übernehmen
+  const [batchZone, setBatchZone] = useState('K'); // Zielzone für neu gescannte Artikel
   const [exportZones, setExportZones] = useState(['K', 'F', 'V', 'S']); // Standard: alle ausgewählt
   const [exportCopied, setExportCopied] = useState(false);
 
@@ -801,6 +804,96 @@ export default function VorratApp() {
     }
   };
 
+  // Mehrere Artikel nacheinander scannen und sammeln
+  const openBatchScan = () => {
+    setBatchZone(activeZone);
+    setScanMsg('');
+    setShowAdd(false);
+    setShowBatch(true);
+  };
+
+  const handleBatchScan = async () => {
+    setScanMsg('');
+    setScanBusy(true);
+    try {
+      const result = await scanAndLookup();
+      if (!result) return; // abgebrochen
+      const { barcode, product } = result;
+      setBatchItems((prev) => {
+        // Gleicher Barcode schon dabei -> bei Stück die Menge erhöhen
+        const idx = prev.findIndex((b) => b.barcode && b.barcode === barcode);
+        if (idx >= 0 && prev[idx].unit === 'stk') {
+          const next = [...prev];
+          next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
+          return next;
+        }
+        const base = product || { name: '', category: 'Sonstiges', qty: 1, unit: 'stk' };
+        return [
+          ...prev,
+          {
+            key: 'b' + Date.now() + Math.random().toString(36).slice(2, 6),
+            barcode,
+            name: base.name || '',
+            category: base.category || 'Sonstiges',
+            qty: base.qty || 1,
+            unit: base.unit || 'stk',
+            zone: batchZone,
+          },
+        ];
+      });
+      setScanMsg(
+        product
+          ? `✓ ${product.name || 'Artikel'} hinzugefügt.`
+          : `Barcode ${barcode} nicht gefunden – Name bitte unten ergänzen.`
+      );
+    } catch (e) {
+      setScanMsg(e?.message || 'Scan fehlgeschlagen.');
+    } finally {
+      setScanBusy(false);
+    }
+  };
+
+  const updateBatchItem = (key, patch) =>
+    setBatchItems((prev) => prev.map((b) => (b.key === key ? { ...b, ...patch } : b)));
+  const removeBatchItem = (key) =>
+    setBatchItems((prev) => prev.filter((b) => b.key !== key));
+  const cycleBatchZone = (key) =>
+    setBatchItems((prev) =>
+      prev.map((b) => {
+        if (b.key !== key) return b;
+        const order = ['K', 'F', 'V', 'S'];
+        return { ...b, zone: order[(order.indexOf(b.zone) + 1) % order.length] };
+      })
+    );
+
+  const commitBatch = () => {
+    const valid = batchItems.filter((b) => b.name.trim());
+    if (valid.length === 0) return;
+    const ts = Date.now();
+    const newOnes = valid.map((b, i) => ({
+      id: 'i' + ts + '_' + i,
+      zone: b.zone,
+      category: b.category,
+      name: b.name.trim(),
+      qty: b.qty > 0 ? b.qty : 1,
+      unit: b.unit,
+      mhd: null,
+    }));
+    setItems((prev) => [...prev, ...newOnes]);
+    // Falls ein übernommener Artikel auf der Einkaufsliste stand: dort raus
+    setShopping((prev) =>
+      prev.filter(
+        (s) =>
+          !newOnes.some(
+            (n) => n.name.toLowerCase() === s.name.toLowerCase() && (s.zone === n.zone || s.zone === null)
+          )
+      )
+    );
+    setBatchItems([]);
+    setShowBatch(false);
+    setActiveZone(batchZone);
+  };
+
   const addItem = () => {
     if (!newItem.name.trim()) return;
     const id = 'i' + Date.now();
@@ -836,10 +929,10 @@ export default function VorratApp() {
       .sort((a, b) => a.days - b.days);
   }, [items]);
 
-  // Scan-Hinweis zurücksetzen, sobald beide Formulare zu sind
+  // Scan-Hinweis zurücksetzen, sobald alle Scan-Formulare zu sind
   useEffect(() => {
-    if (!showAdd && !editItem) setScanMsg('');
-  }, [showAdd, editItem]);
+    if (!showAdd && !editItem && !showBatch) setScanMsg('');
+  }, [showAdd, editItem, showBatch]);
 
   // Timer aufräumen, damit nach Unmount kein setState mehr feuert
   useEffect(() => {
@@ -1163,7 +1256,20 @@ export default function VorratApp() {
                 {scanBusy ? 'Scanne…' : 'Barcode scannen'}
               </button>
             )}
-            {scanMsg && (
+            {scanSupported && (
+              <button
+                onClick={openBatchScan}
+                style={{
+                  width: '100%', padding: '10px', borderRadius: 12, marginBottom: 6,
+                  border: `1px solid ${t.border}`, background: 'transparent',
+                  color: t.pillInactiveText, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                }}
+              >
+                <BarcodeIcon size={16} color={t.pillInactiveText} /> Mehrere nacheinander scannen
+              </button>
+            )}
+            {scanMsg && !showBatch && (
               <div style={{
                 fontSize: 12, color: scanMsg.startsWith('✓') ? t.success : t.textMuted,
                 background: t.inputBg, border: `1px solid ${t.border}`, borderRadius: 10,
@@ -1291,6 +1397,155 @@ export default function VorratApp() {
             >
               Hinzufügen
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Batch-Scan modal */}
+      {showBatch && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: t.overlay,
+            display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 20,
+          }}
+          onClick={() => setShowBatch(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: t.card, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px',
+              width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
+              maxHeight: '94vh', overflowY: 'auto',
+            }}
+          >
+            <div style={modalHeaderStyle}>
+              <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t.text }}>
+                Mehrere scannen{batchItems.length > 0 ? ` · ${batchItems.length}` : ''}
+              </h2>
+              <button onClick={() => setShowBatch(false)} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
+                <X size={16} />
+              </button>
+            </div>
+
+            <label style={labelStyle}>Zielzone für neue Scans</label>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              {ZONES.map((z) => {
+                const active = batchZone === z.id;
+                return (
+                  <button
+                    key={z.id}
+                    onClick={() => setBatchZone(z.id)}
+                    style={{
+                      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+                      padding: '11px 4px', borderRadius: 12, border: 'none', cursor: 'pointer',
+                      background: active ? z.bgActive : t.cardAlt,
+                    }}
+                    aria-label={`Zielzone ${z.label}`}
+                  >
+                    <span style={{ fontSize: 18 }}>{z.emoji}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: active ? t.headerText : t.pillInactiveText }}>
+                      {z.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={handleBatchScan}
+              disabled={scanBusy}
+              style={{
+                width: '100%', padding: '13px', borderRadius: 12, marginBottom: 6,
+                border: `1.5px solid ${zone.bgActive}`,
+                background: dark ? zone.bgDark : zone.bg,
+                color: dark ? zone.colorDark : zone.color,
+                fontSize: 14.5, fontWeight: 700, cursor: scanBusy ? 'default' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9,
+                opacity: scanBusy ? 0.6 : 1,
+              }}
+            >
+              <BarcodeIcon size={19} color={dark ? zone.colorDark : zone.color} />
+              {scanBusy ? 'Scanne…' : 'Barcode scannen'}
+            </button>
+            {scanMsg && (
+              <div style={{
+                fontSize: 12, color: scanMsg.startsWith('✓') ? t.success : t.textMuted,
+                background: t.inputBg, border: `1px solid ${t.border}`, borderRadius: 10,
+                padding: '9px 11px', marginBottom: 10, lineHeight: 1.4,
+              }}>
+                {scanMsg}
+              </div>
+            )}
+
+            {batchItems.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '26px 20px', color: t.textFaint }}>
+                <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>
+                  Noch nichts gescannt. Scanne Produkt für Produkt – jeder Treffer landet hier in der
+                  Liste. Namen kannst du direkt anpassen, die Zone übers Emoji wechseln.
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ background: t.inputBg, borderRadius: 12, overflow: 'hidden', border: `1px solid ${t.border}`, marginBottom: 12 }}>
+                  {batchItems.map((b, idx) => {
+                    const z = ZONES.find((zz) => zz.id === b.zone) || ZONES[0];
+                    const accent = dark ? z.colorDark : z.color;
+                    return (
+                      <div
+                        key={b.key}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
+                          borderBottom: idx < batchItems.length - 1 ? `1px solid ${t.border}` : 'none',
+                        }}
+                      >
+                        <button
+                          onClick={() => cycleBatchZone(b.key)}
+                          aria-label={`Zone wechseln (aktuell ${z.label})`}
+                          style={{ ...btnCircle(dark ? z.bgDark : z.bg, accent), width: 34, height: 34, fontSize: 16, flexShrink: 0 }}
+                        >
+                          {z.emoji}
+                        </button>
+                        <input
+                          value={b.name}
+                          onChange={(e) => updateBatchItem(b.key, { name: e.target.value })}
+                          placeholder="Name ergänzen…"
+                          style={{ ...inputStyle, marginTop: 0, flex: 1, padding: '8px 10px', fontSize: 14 }}
+                        />
+                        {b.unit === 'stk' ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                            <button onClick={() => updateBatchItem(b.key, { qty: Math.max(1, b.qty - 1) })} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
+                              <Minus size={13} strokeWidth={2.5} />
+                            </button>
+                            <span style={{ minWidth: 20, textAlign: 'center', fontSize: 13.5, fontWeight: 700, color: accent }}>{b.qty}x</span>
+                            <button onClick={() => updateBatchItem(b.key, { qty: b.qty + 1 })} style={btnCircle(dark ? z.bgDark : z.bg, accent)}>
+                              <Plus size={13} strokeWidth={2.5} />
+                            </button>
+                          </div>
+                        ) : (
+                          <span style={{ fontSize: 13, fontWeight: 700, color: accent, flexShrink: 0 }}>{b.qty}{b.unit}</span>
+                        )}
+                        <button onClick={() => removeBatchItem(b.key)} style={{ ...btnCircle('transparent', t.danger), flexShrink: 0 }} aria-label="Von der Liste entfernen">
+                          <X size={14} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={commitBatch}
+                  disabled={!batchItems.some((b) => b.name.trim())}
+                  style={{
+                    width: '100%', padding: '14px', borderRadius: 12, border: 'none',
+                    background: batchItems.some((b) => b.name.trim()) ? zone.bgActive : t.border,
+                    color: batchItems.some((b) => b.name.trim()) ? t.headerText : t.textFaint,
+                    fontSize: 15, fontWeight: 700,
+                    cursor: batchItems.some((b) => b.name.trim()) ? 'pointer' : 'default',
+                  }}
+                >
+                  {batchItems.filter((b) => b.name.trim()).length} in den Bestand übernehmen
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
