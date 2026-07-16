@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Plus, Minus, Trash2, X, Package, AlertTriangle, ShoppingCart } from 'lucide-react';
+import { Plus, Minus, Trash2, X, Package, AlertTriangle, ShoppingCart, Check } from 'lucide-react';
 
 function useSystemTheme() {
   const [systemDark, setSystemDark] = useState(
@@ -333,6 +333,9 @@ export default function VorratApp() {
   const [items, setItems, loaded] = useStorage('vorrat-items-v6', SEED);
   const [shopping, setShopping, shoppingLoaded] = useStorage('vorrat-shopping-v1', []);
   const [showShopping, setShowShopping] = useState(false);
+  const [shoppingInput, setShoppingInput] = useState('');
+  const [justChecked, setJustChecked] = useState(null);
+  const checkedTimerRef = useRef(null);
   const [search, setSearch] = useState('');
   const [deletedItem, setDeletedItem] = useState(null);
   const undoTimerRef = useRef(null);
@@ -354,6 +357,7 @@ export default function VorratApp() {
   const zoneIds = ZONES.map((z) => z.id);
   const labelStyle = makeLabelStyle(t);
   const inputStyle = makeInputStyle(t, dark);
+  const modalHeaderStyle = makeModalHeaderStyle(t);
 
   const findCategory = (raw) => {
     const norm = (raw || '').trim().toLowerCase();
@@ -634,14 +638,22 @@ export default function VorratApp() {
   const undoDelete = () => {
     if (!deletedItem) return;
     setItems((prev) => [...prev, deletedItem]);
-    // War nur ein Versehen -> auch wieder von der Einkaufsliste runter
-    setShopping((prev) => prev.filter((s) => s.id !== deletedItem.id));
+    // War nur ein Versehen -> auch wieder von der Einkaufsliste runter.
+    // Manuell gesetzte Nachkauf-Vermerke bleiben aber bestehen.
+    setShopping((prev) => prev.filter((s) => s.id !== deletedItem.id || s.manual));
     setDeletedItem(null);
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
   };
 
   // Artikel von der Einkaufsliste zurück in den Bestand (eingekauft)
   const restoreFromShopping = (entry) => {
+    // Freier Eintrag ohne Zone/Kategorie -> Neuanlage-Formular mit vorausgefülltem Namen
+    if (!entry.zone) {
+      setNewItem({ name: entry.name, category: CATEGORIES[0], qty: 1, unit: 'stk', mhd: null });
+      setShowShopping(false);
+      setShowAdd(true);
+      return;
+    }
     setShopping((prev) => prev.filter((s) => s.id !== entry.id));
     setItems((prev) => {
       const idx = prev.findIndex(
@@ -653,14 +665,73 @@ export default function VorratApp() {
         next[idx] = { ...next[idx], qty: next[idx].qty + (entry.qty > 0 ? entry.qty : 1) };
         return next;
       }
-      const { addedAt, ...item } = entry;
+      const { addedAt, manual, ...item } = entry;
       return [...prev, { ...item, qty: entry.qty > 0 ? entry.qty : 1 }];
     });
     setActiveZone(entry.zone);
   };
 
+  // Abhaken: kurz grün bestätigen, dann erst zurücklegen - sonst ist die Zeile weg,
+  // bevor man das Feedback sieht
+  const checkAndRestore = (entry) => {
+    if (!entry.zone) {
+      restoreFromShopping(entry);
+      return;
+    }
+    setJustChecked(entry.id);
+    if (checkedTimerRef.current) clearTimeout(checkedTimerRef.current);
+    checkedTimerRef.current = setTimeout(() => {
+      restoreFromShopping(entry);
+      setJustChecked(null);
+    }, 400);
+  };
+
   const removeFromShopping = (id) => {
     setShopping((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  // Artikel bleibt im Bestand, wird zusätzlich als Nachkauf-Bedarf vermerkt
+  const isOnShoppingList = (item) =>
+    shopping.some((s) => s.zone === item.zone && s.name.toLowerCase() === item.name.toLowerCase());
+
+  // Freier Eintrag ohne Zone/Kategorie - die kommen erst beim Zurücklegen dazu
+  const addManualShoppingEntry = () => {
+    const name = shoppingInput.trim();
+    if (!name) return;
+    const exists = shopping.some((s) => s.name.toLowerCase() === name.toLowerCase());
+    if (exists) {
+      setShoppingInput('');
+      return;
+    }
+    setShopping((prev) => [
+      ...prev,
+      {
+        id: 'sl' + Date.now() + Math.random().toString(36).slice(2, 6),
+        name, zone: null, category: null, qty: 1, unit: 'stk', mhd: null,
+        manual: true, addedAt: Date.now(),
+      },
+    ]);
+    setShoppingInput('');
+  };
+
+  const toggleShoppingForItem = (item) => {
+    setShopping((prev) => {
+      const exists = prev.some(
+        (s) => s.zone === item.zone && s.name.toLowerCase() === item.name.toLowerCase()
+      );
+      if (exists) {
+        return prev.filter(
+          (s) => !(s.zone === item.zone && s.name.toLowerCase() === item.name.toLowerCase())
+        );
+      }
+      return [...prev, { ...item, addedAt: Date.now(), manual: true }];
+    });
+  };
+
+  // Formular immer sauber verlassen - sonst hängt ein vorausgefüllter Name aus der Einkaufsliste fest
+  const closeAddModal = () => {
+    setNewItem({ name: '', category: CATEGORIES[0], qty: 1, unit: 'stk', mhd: null });
+    setShowAdd(false);
   };
 
   const addItem = () => {
@@ -671,9 +742,16 @@ export default function VorratApp() {
       ...prev,
       { id, zone: activeZone, category: newItem.category, name, qty: newItem.qty, unit: newItem.unit, mhd: newItem.mhd || null },
     ]);
-    // Falls der Artikel auf der Einkaufsliste stand: dort raus, er ist ja wieder da
+    // Falls der Artikel auf der Einkaufsliste stand: dort raus, er ist ja wieder da.
+    // Greift auch bei freien Einträgen ohne Zone (die matchen nur über den Namen).
     setShopping((prev) =>
-      prev.filter((s) => !(s.zone === activeZone && s.name.toLowerCase() === name.toLowerCase()))
+      prev.filter(
+        (s) =>
+          !(
+            s.name.toLowerCase() === name.toLowerCase() &&
+            (s.zone === activeZone || s.zone === null)
+          )
+      )
     );
     setNewItem({ name: '', category: CATEGORIES[0], qty: 1, unit: 'stk', mhd: null });
     setShowAdd(false);
@@ -697,6 +775,7 @@ export default function VorratApp() {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      if (checkedTimerRef.current) clearTimeout(checkedTimerRef.current);
     };
   }, []);
 
@@ -713,25 +792,23 @@ export default function VorratApp() {
       {/* Header + Tabs bleiben zusammen oben stehen */}
       <div style={{ position: 'sticky', top: 0, zIndex: 10, background: t.bg }}>
       <div style={{ background: zone.bgActive, padding: '20px 20px 14px', transition: 'background 0.3s ease' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', maxWidth: 480, margin: '0 auto', gap: 12 }}>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.75)', letterSpacing: '0.02em', marginBottom: 2 }}>
-              VORRATS-TRACKER
-            </div>
+        <div style={{ maxWidth: 480, margin: '0 auto' }}>
+
+          {/* Zeile 1: Produktname */}
+          <div style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.75)', letterSpacing: '0.02em', marginBottom: 2 }}>
+            VORRATS-TRACKER
+          </div>
+
+          {/* Zeile 2: Zonenname links, Export/Import rechts auf gleicher Höhe */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <h1 style={{
               margin: 0, fontSize: 26, fontWeight: 700, color: t.headerText, letterSpacing: '-0.01em',
-              display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap',
+              display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap', minWidth: 0,
             }}>
               <span>{zone.emoji}</span>
               <span>{zone.label}</span>
             </h1>
-            <div style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>
-              <span style={{ fontSize: 18, fontWeight: 700 }}>{totalInZone}</span>
-              <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 5 }}>Artikel</span>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8, flexShrink: 0 }}>
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
               <button
                 onClick={() => setShowExport(true)}
                 style={{
@@ -751,34 +828,53 @@ export default function VorratApp() {
                 Import
               </button>
             </div>
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          </div>
+
+          {/* Zeile 3: Anzahl links, Warenkorb + Einstellungen rechts unten im Eck */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 6 }}>
+            <div style={{ color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap' }}>
+              <span style={{ fontSize: 18, fontWeight: 700 }}>{totalInZone}</span>
+              <span style={{ fontSize: 12, opacity: 0.8, marginLeft: 5 }}>Artikel</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
               <button
                 onClick={() => setShowShopping(true)}
-                aria-label="Einkaufsliste öffnen"
+                aria-label={`Einkaufsliste öffnen${shopping.length > 0 ? ` (${shopping.length})` : ''}`}
                 style={{
-                  background: 'rgba(255,255,255,0.18)', border: 'none', borderRadius: 10,
-                  padding: '6px 10px', color: t.headerText, cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 5, position: 'relative',
+                  background: 'rgba(255,255,255,0.18)', border: 'none', borderRadius: 12,
+                  width: 44, height: 44, color: t.headerText, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  position: 'relative', flexShrink: 0,
                 }}
               >
-                <ShoppingCart size={15} strokeWidth={2.2} />
-                {shopping && shopping.length > 0 && (
-                  <span style={{ fontSize: 11.5, fontWeight: 700 }}>{shopping.length}</span>
+                <ShoppingCart size={20} strokeWidth={2.2} />
+                {shopping.length > 0 && (
+                  <span
+                    style={{
+                      position: 'absolute', top: -4, right: -4, minWidth: 19, height: 19,
+                      borderRadius: 10, background: t.headerText, color: zone.bgActive,
+                      fontSize: 11, fontWeight: 800, display: 'flex', alignItems: 'center',
+                      justifyContent: 'center', padding: '0 5px', boxSizing: 'border-box',
+                    }}
+                  >
+                    {shopping.length}
+                  </span>
                 )}
               </button>
               <button
                 onClick={() => setShowSettings(true)}
                 aria-label="Einstellungen öffnen"
                 style={{
-                  background: 'rgba(255,255,255,0.18)', border: 'none', borderRadius: 10,
-                  padding: '6px 10px', color: t.headerText, fontSize: 14, cursor: 'pointer',
-                  display: 'flex', alignItems: 'center',
+                  background: 'rgba(255,255,255,0.18)', border: 'none', borderRadius: 12,
+                  width: 44, height: 44, color: t.headerText, fontSize: 19, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
                 }}
               >
                 ⚙️
               </button>
             </div>
           </div>
+
         </div>
       </div>
 
@@ -958,21 +1054,21 @@ export default function VorratApp() {
             position: 'fixed', inset: 0, background: t.overlay,
             display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 20,
           }}
-          onClick={() => setShowAdd(false)}
+          onClick={() => closeAddModal()}
         >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
               background: t.card, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px',
               width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
-              maxHeight: '88vh', overflowY: 'auto',
+              maxHeight: '94vh', overflowY: 'auto',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <div style={modalHeaderStyle}>
               <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t.text }}>
-                Neuer Artikel · {zone.emoji} {zone.label}
+                Neuer Artikel
               </h2>
-              <button onClick={() => setShowAdd(false)} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
+              <button onClick={() => closeAddModal()} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
                 <X size={16} />
               </button>
             </div>
@@ -984,6 +1080,30 @@ export default function VorratApp() {
               placeholder="z.B. Frischmilch"
               style={inputStyle}
             />
+
+            <label style={labelStyle}>Zone</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {ZONES.map((z) => {
+                const active = activeZone === z.id;
+                return (
+                  <button
+                    key={z.id}
+                    onClick={() => setActiveZone(z.id)}
+                    style={{
+                      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+                      padding: '11px 4px', borderRadius: 12, border: 'none', cursor: 'pointer',
+                      background: active ? z.bgActive : t.cardAlt,
+                    }}
+                    aria-label={`Zone ${z.label}`}
+                  >
+                    <span style={{ fontSize: 18 }}>{z.emoji}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: active ? t.headerText : t.pillInactiveText }}>
+                      {z.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
 
             <label style={labelStyle}>Kategorie</label>
             <CategoryPicker
@@ -1072,10 +1192,10 @@ export default function VorratApp() {
             style={{
               background: t.card, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px',
               width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
-              maxHeight: '85vh', overflowY: 'auto',
+              maxHeight: '94vh', overflowY: 'auto',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <div style={modalHeaderStyle}>
               <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t.text }}>
                 Einkaufsliste{shopping.length > 0 ? ` · ${shopping.length}` : ''}
               </h2>
@@ -1083,15 +1203,36 @@ export default function VorratApp() {
                 <X size={16} />
               </button>
             </div>
-            <p style={{ fontSize: 12, color: t.textFaint, marginTop: 0, marginBottom: 16, lineHeight: 1.5 }}>
-              Aufgebrauchte und gelöschte Artikel landen hier automatisch. Antippen legt sie mit der
-              alten Zone, Kategorie und Menge zurück in den Bestand.
+            <p style={{ fontSize: 12, color: t.textFaint, marginTop: -6, marginBottom: 16, lineHeight: 1.5 }}>
+              Aufgebrauchte Artikel landen hier automatisch. Abhaken legt sie zurück in den Bestand.
+              Freie Einträge kannst du oben eintippen — die fragen beim Abhaken nach Zone und Kategorie.
             </p>
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              <input
+                value={shoppingInput}
+                onChange={(e) => setShoppingInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') addManualShoppingEntry(); }}
+                placeholder="z.B. Bananen"
+                style={{ ...inputStyle, marginTop: 0, flex: 1 }}
+              />
+              <button
+                onClick={addManualShoppingEntry}
+                disabled={!shoppingInput.trim()}
+                aria-label="Auf die Einkaufsliste setzen"
+                style={{
+                  ...btnCircle(shoppingInput.trim() ? t.text : t.border, t.btnPrimaryText),
+                  width: 44, height: 44, flexShrink: 0,
+                }}
+              >
+                <Plus size={18} strokeWidth={2.5} />
+              </button>
+            </div>
 
             {shopping.length === 0 ? (
               <div style={{ textAlign: 'center', padding: '36px 20px', color: t.textFaint }}>
                 <ShoppingCart size={30} strokeWidth={1.5} style={{ marginBottom: 10, opacity: 0.6 }} />
-                <div style={{ fontSize: 13.5 }}>Nichts aufgebraucht — Liste ist leer.</div>
+                <div style={{ fontSize: 13.5 }}>Liste ist leer.</div>
               </div>
             ) : (
               <>
@@ -1099,8 +1240,9 @@ export default function VorratApp() {
                   {[...shopping]
                     .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
                     .map((entry, idx, arr) => {
-                      const z = ZONES.find((zz) => zz.id === entry.zone) || ZONES[0];
-                      const accent = dark ? z.colorDark : z.color;
+                      const z = entry.zone ? ZONES.find((zz) => zz.id === entry.zone) : null;
+                      const accent = z ? (dark ? z.colorDark : z.color) : t.textMuted;
+                      const checked = justChecked === entry.id;
                       return (
                         <div
                           key={entry.id}
@@ -1108,31 +1250,49 @@ export default function VorratApp() {
                             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                             padding: '12px 14px', gap: 10,
                             borderBottom: idx < arr.length - 1 ? `1px solid ${t.border}` : 'none',
+                            opacity: checked ? 0.55 : 1,
+                            transition: 'opacity 0.25s ease',
                           }}
                         >
                           <button
-                            onClick={() => restoreFromShopping(entry)}
+                            onClick={() => checkAndRestore(entry)}
                             style={{
                               flex: 1, minWidth: 0, textAlign: 'left', background: 'none',
                               border: 'none', cursor: 'pointer', padding: 0,
                             }}
-                            aria-label={`${entry.name} zurück in den Bestand legen`}
+                            aria-label={`${entry.name} als gekauft abhaken`}
                           >
-                            <div style={{ fontSize: 14.5, color: t.text, fontWeight: 500 }}>{entry.name}</div>
+                            <div style={{
+                              fontSize: 14.5, color: t.text, fontWeight: 500,
+                              textDecoration: checked ? 'line-through' : 'none',
+                            }}>
+                              {entry.name}
+                            </div>
                             <div style={{ fontSize: 10.5, color: accent, fontWeight: 600, marginTop: 2 }}>
-                              {z.emoji} {z.label} · {entry.category} ·{' '}
-                              {entry.unit === 'stk' ? `${entry.qty > 0 ? entry.qty : 1}x` : `${entry.qty > 0 ? entry.qty : 1}${entry.unit}`}
+                              {z ? (
+                                <>
+                                  {z.emoji} {z.label} · {entry.category} ·{' '}
+                                  {entry.unit === 'stk' ? `${entry.qty > 0 ? entry.qty : 1}x` : `${entry.qty > 0 ? entry.qty : 1}${entry.unit}`}
+                                  {entry.manual ? ' · Nachkauf' : ''}
+                                </>
+                              ) : (
+                                'Neu · noch nicht im Bestand'
+                              )}
                             </div>
                           </button>
                           <button
-                            onClick={() => restoreFromShopping(entry)}
+                            onClick={() => checkAndRestore(entry)}
                             style={{
-                              ...btnCircle(dark ? z.bgDark : z.bg, accent),
-                              width: 32, height: 32,
+                              ...btnCircle(
+                                checked ? t.success : (z ? (dark ? z.bgDark : z.bg) : t.cardAlt),
+                                checked ? t.headerText : accent
+                              ),
+                              width: 34, height: 34,
+                              transition: 'background 0.2s ease',
                             }}
-                            aria-label={`${entry.name} eingekauft`}
+                            aria-label={`${entry.name} als gekauft abhaken`}
                           >
-                            <Plus size={15} strokeWidth={2.5} />
+                            <Check size={17} strokeWidth={3} />
                           </button>
                           <button
                             onClick={() => removeFromShopping(entry.id)}
@@ -1174,9 +1334,10 @@ export default function VorratApp() {
             style={{
               background: t.card, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px',
               width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
+              maxHeight: '94vh', overflowY: 'auto',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <div style={modalHeaderStyle}>
               <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t.text }}>Einstellungen</h2>
               <button onClick={() => setShowSettings(false)} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
                 <X size={16} />
@@ -1229,11 +1390,11 @@ export default function VorratApp() {
             onClick={(e) => e.stopPropagation()}
             style={{
               background: t.card, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px',
-              width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)', maxHeight: '85vh',
-              display: 'flex', flexDirection: 'column', overflowY: 'auto',
+              width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)', maxHeight: '94vh',
+              overflowY: 'auto',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={modalHeaderStyle}>
               <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t.text }}>Bestand exportieren</h2>
               <button onClick={() => setShowExport(false)} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
                 <X size={16} />
@@ -1333,10 +1494,10 @@ export default function VorratApp() {
             onClick={(e) => e.stopPropagation()}
             style={{
               background: t.card, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px',
-              width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)', maxHeight: '85vh', overflowY: 'auto',
+              width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)', maxHeight: '94vh', overflowY: 'auto',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={modalHeaderStyle}>
               <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t.text }}>Bestand importieren</h2>
               <button onClick={() => setShowImport(false)} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
                 <X size={16} />
@@ -1412,37 +1573,37 @@ export default function VorratApp() {
             style={{
               background: t.card, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px',
               width: '100%', maxWidth: 480, boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
-              maxHeight: '88vh', overflowY: 'auto',
+              maxHeight: '94vh', overflowY: 'auto',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <label style={{ ...labelStyle, marginTop: 0 }}>Name</label>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <input
-                    value={editItem.name}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setEditItem((s) => ({ ...s, name: val }));
-                    }}
-                    style={{ ...inputStyle, marginTop: 0, fontSize: 16, fontWeight: 600, flex: 1 }}
-                  />
-                  <button
-                    onClick={() => saveEditFields(false)}
-                    disabled={!editItem.name.trim()}
-                    aria-label="Speichern, ohne zu schließen"
-                    style={{
-                      ...btnCircle(justSaved ? t.success : (editItem.name.trim() ? t.text : t.border), t.btnPrimaryText),
-                      width: 40, height: 40, fontSize: 16, fontWeight: 700, flexShrink: 0,
-                      transition: 'background 0.15s ease',
-                    }}
-                  >
-                    ✓
-                  </button>
-                </div>
-              </div>
-              <button onClick={() => setEditItem(null)} style={{ ...btnCircle(t.cardAlt, t.pillInactiveText), marginTop: 20 }}>
+            <div style={modalHeaderStyle}>
+              <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t.text }}>Artikel bearbeiten</h2>
+              <button onClick={() => setEditItem(null)} style={btnCircle(t.cardAlt, t.pillInactiveText)}>
                 <X size={16} />
+              </button>
+            </div>
+
+            <label style={{ ...labelStyle, marginTop: 0 }}>Name</label>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+              <input
+                value={editItem.name}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setEditItem((s) => ({ ...s, name: val }));
+                }}
+                style={{ ...inputStyle, marginTop: 0, fontSize: 16, fontWeight: 600, flex: 1 }}
+              />
+              <button
+                onClick={() => saveEditFields(false)}
+                disabled={!editItem.name.trim()}
+                aria-label="Speichern, ohne zu schließen"
+                style={{
+                  ...btnCircle(justSaved ? t.success : (editItem.name.trim() ? t.text : t.border), t.btnPrimaryText),
+                  width: 40, height: 40, fontSize: 16, fontWeight: 700, flexShrink: 0,
+                  transition: 'background 0.15s ease',
+                }}
+              >
+                ✓
               </button>
             </div>
 
@@ -1555,6 +1716,28 @@ export default function VorratApp() {
             >
               {justSaved ? 'Gespeichert ✓' : 'Speichern'}
             </button>
+            {(() => {
+              const onList = isOnShoppingList(editItem);
+              const ez = ZONES.find((z) => z.id === editItem.zone) || zone;
+              const ezColor = dark ? ez.colorDark : ez.color;
+              return (
+                <button
+                  onClick={() => toggleShoppingForItem(editItem)}
+                  style={{
+                    width: '100%', padding: '12px', borderRadius: 12,
+                    border: `1.5px solid ${onList ? ezColor : t.border}`,
+                    background: onList ? (dark ? ez.bgDark : ez.bg) : 'transparent',
+                    color: onList ? ezColor : t.pillInactiveText,
+                    fontSize: 13.5, fontWeight: 600, cursor: 'pointer', marginBottom: 10,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  <ShoppingCart size={15} strokeWidth={2.2} />
+                  {onList ? 'Steht auf der Einkaufsliste' : 'Auf die Einkaufsliste'}
+                </button>
+              );
+            })()}
             <button
               onClick={() => { removeItem(editItem.id); setEditItem(null); }}
               style={{
@@ -1614,8 +1797,17 @@ function pillStyle(active, t) {
   };
 }
 
-function makeLabelStyle(t) {
-  return { display: 'block', fontSize: 11, fontWeight: 700, color: t.textFaint, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6, marginTop: 14 };
+// Kopfzeile klebt oben im Modal, damit der X-Button beim Scrollen erreichbar bleibt
+function makeModalHeaderStyle(t) {
+  return {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    marginBottom: 16, position: 'sticky', top: 0, zIndex: 2,
+    background: t.card, paddingTop: 4, paddingBottom: 10,
+    marginLeft: -20, marginRight: -20, paddingLeft: 20, paddingRight: 20,
+  };
+}
+
+function makeLabelStyle(t) {  return { display: 'block', fontSize: 11, fontWeight: 700, color: t.textFaint, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6, marginTop: 14 };
 }
 function makeInputStyle(t, dark) {
   return {
