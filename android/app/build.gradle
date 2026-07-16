@@ -10,6 +10,11 @@ android {
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // Nur ARM-Architekturen bündeln (echte Geräte). x86/x86_64 sind nur
+        // für Emulatoren und verdoppeln sonst die nativen Bibliotheken.
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
@@ -28,6 +33,16 @@ repositories {
     flatDir{
         dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
     }
+}
+
+// Die App braucht für deutsche Etiketten nur das lateinische Texterkennungs-Modell.
+// Die großen CJK-/Devanagari-Modelle werden nie genutzt und rausgeworfen -> spart
+// deutlich APK-Größe. (App fordert nie ein anderes Skript an als das Standard-Latein.)
+configurations.all {
+    exclude group: 'com.google.mlkit', module: 'text-recognition-chinese'
+    exclude group: 'com.google.mlkit', module: 'text-recognition-devanagari'
+    exclude group: 'com.google.mlkit', module: 'text-recognition-japanese'
+    exclude group: 'com.google.mlkit', module: 'text-recognition-korean'
 }
 
 dependencies {
