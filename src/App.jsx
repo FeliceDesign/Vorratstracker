@@ -1,5 +1,22 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Plus, Minus, Trash2, X, Package, AlertTriangle, ShoppingCart, Check } from 'lucide-react';
+import { isScanSupported, scanAndLookup, capturePhotoAndReadDate } from './scan.js';
+
+// Kleines eigenes Barcode-Icon (kein Extra-Paket nötig)
+function BarcodeIcon({ size = 17, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <g stroke={color} strokeWidth="1.6" strokeLinecap="round">
+        <line x1="4" y1="6" x2="4" y2="18" />
+        <line x1="7.5" y1="6" x2="7.5" y2="18" />
+        <line x1="10" y1="6" x2="10" y2="18" strokeWidth="2.6" />
+        <line x1="13" y1="6" x2="13" y2="18" />
+        <line x1="16.5" y1="6" x2="16.5" y2="18" strokeWidth="2.6" />
+        <line x1="20" y1="6" x2="20" y2="18" />
+      </g>
+    </svg>
+  );
+}
 
 function useSystemTheme() {
   const [systemDark, setSystemDark] = useState(
@@ -350,6 +367,9 @@ export default function VorratApp() {
   const [editItem, setEditItem] = useState(null); // Artikel-Objekt während Bearbeiten, sonst null
   const [showExport, setShowExport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const scanSupported = isScanSupported();
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanMsg, setScanMsg] = useState('');
   const [exportZones, setExportZones] = useState(['K', 'F', 'V', 'S']); // Standard: alle ausgewählt
   const [exportCopied, setExportCopied] = useState(false);
 
@@ -731,7 +751,54 @@ export default function VorratApp() {
   // Formular immer sauber verlassen - sonst hängt ein vorausgefüllter Name aus der Einkaufsliste fest
   const closeAddModal = () => {
     setNewItem({ name: '', category: CATEGORIES[0], qty: 1, unit: 'stk', mhd: null });
+    setScanMsg('');
     setShowAdd(false);
+  };
+
+  // Barcode scannen -> Produkt bei Open Food Facts nachschlagen -> Add-Formular vorbefüllen
+  const handleScanBarcode = async () => {
+    setScanMsg('');
+    setScanBusy(true);
+    try {
+      const result = await scanAndLookup();
+      if (!result) return; // abgebrochen
+      if (result.product) {
+        setNewItem((s) => ({
+          ...s,
+          name: result.product.name,
+          category: result.product.category || s.category,
+          unit: result.product.unit,
+          qty: result.product.qty,
+        }));
+        setScanMsg(`✓ ${result.product.name} erkannt.`);
+      } else {
+        setScanMsg(`Barcode ${result.barcode} nicht gefunden – bitte Name manuell eingeben.`);
+      }
+    } catch (e) {
+      setScanMsg(e?.message || 'Scan fehlgeschlagen.');
+    } finally {
+      setScanBusy(false);
+    }
+  };
+
+  // Foto vom aufgedruckten MHD -> Datum per Texterkennung auslesen und eintragen
+  const handleScanDate = async (target) => {
+    setScanMsg('');
+    setScanBusy(true);
+    try {
+      const { date } = await capturePhotoAndReadDate();
+      if (date) {
+        if (target === 'edit') setEditItem((s) => ({ ...s, mhd: date }));
+        else setNewItem((s) => ({ ...s, mhd: date }));
+        setScanMsg('✓ Datum erkannt.');
+      } else {
+        setScanMsg('Kein Datum erkannt – bitte manuell eintragen oder erneut fotografieren.');
+      }
+    } catch (e) {
+      setScanMsg(e?.message || 'Foto-Erkennung fehlgeschlagen.');
+    } finally {
+      setScanBusy(false);
+    }
   };
 
   const addItem = () => {
@@ -768,6 +835,11 @@ export default function VorratApp() {
       .filter((i) => i.days <= 1)
       .sort((a, b) => a.days - b.days);
   }, [items]);
+
+  // Scan-Hinweis zurücksetzen, sobald beide Formulare zu sind
+  useEffect(() => {
+    if (!showAdd && !editItem) setScanMsg('');
+  }, [showAdd, editItem]);
 
   // Timer aufräumen, damit nach Unmount kein setState mehr feuert
   useEffect(() => {
@@ -1073,6 +1145,34 @@ export default function VorratApp() {
               </button>
             </div>
 
+            {scanSupported && (
+              <button
+                onClick={handleScanBarcode}
+                disabled={scanBusy}
+                style={{
+                  width: '100%', padding: '13px', borderRadius: 12, marginBottom: 6,
+                  border: `1.5px solid ${zone.bgActive}`,
+                  background: dark ? zone.bgDark : zone.bg,
+                  color: dark ? zone.colorDark : zone.color,
+                  fontSize: 14.5, fontWeight: 700, cursor: scanBusy ? 'default' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9,
+                  opacity: scanBusy ? 0.6 : 1,
+                }}
+              >
+                <BarcodeIcon size={19} color={dark ? zone.colorDark : zone.color} />
+                {scanBusy ? 'Scanne…' : 'Barcode scannen'}
+              </button>
+            )}
+            {scanMsg && (
+              <div style={{
+                fontSize: 12, color: scanMsg.startsWith('✓') ? t.success : t.textMuted,
+                background: t.inputBg, border: `1px solid ${t.border}`, borderRadius: 10,
+                padding: '9px 11px', marginBottom: 8, lineHeight: 1.4,
+              }}>
+                {scanMsg}
+              </div>
+            )}
+
             <label style={labelStyle}>Name</label>
             <input
               value={newItem.name}
@@ -1156,12 +1256,29 @@ export default function VorratApp() {
             )}
 
             <label style={labelStyle}>Haltbar bis (optional)</label>
-            <input
-              type="date"
-              value={newItem.mhd || ''}
-              onChange={(e) => setNewItem((s) => ({ ...s, mhd: e.target.value || null }))}
-              style={{ ...inputStyle, marginBottom: 20 }}
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: scanSupported ? 6 : 20 }}>
+              <input
+                type="date"
+                value={newItem.mhd || ''}
+                onChange={(e) => setNewItem((s) => ({ ...s, mhd: e.target.value || null }))}
+                style={{ ...inputStyle, marginTop: 0, flex: 1 }}
+              />
+              {scanSupported && (
+                <button
+                  onClick={() => handleScanDate('add')}
+                  disabled={scanBusy}
+                  aria-label="MHD vom Foto ablesen"
+                  style={{ ...btnCircle(t.cardAlt, t.text), width: 44, height: 44, flexShrink: 0, fontSize: 19 }}
+                >
+                  📷
+                </button>
+              )}
+            </div>
+            {scanSupported && (
+              <p style={{ fontSize: 11, color: t.textFaint, marginTop: 0, marginBottom: 20 }}>
+                📷 fotografiert das aufgedruckte Datum und trägt es automatisch ein.
+              </p>
+            )}
 
             <button
               onClick={addItem}
@@ -1685,13 +1802,23 @@ export default function VorratApp() {
             )}
 
             <label style={labelStyle}>Haltbar bis (optional)</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: scanSupported || scanMsg ? 6 : 16 }}>
               <input
                 type="date"
                 value={editItem.mhd || ''}
                 onChange={(e) => setEditItem((s) => ({ ...s, mhd: e.target.value || null }))}
-                style={{ ...inputStyle, marginTop: 0 }}
+                style={{ ...inputStyle, marginTop: 0, flex: 1 }}
               />
+              {scanSupported && (
+                <button
+                  onClick={() => handleScanDate('edit')}
+                  disabled={scanBusy}
+                  aria-label="MHD vom Foto ablesen"
+                  style={{ ...btnCircle(t.cardAlt, t.text), width: 40, height: 40, flexShrink: 0, fontSize: 18 }}
+                >
+                  📷
+                </button>
+              )}
               {editItem.mhd && (
                 <button
                   onClick={() => setEditItem((s) => ({ ...s, mhd: null }))}
@@ -1702,6 +1829,15 @@ export default function VorratApp() {
                 </button>
               )}
             </div>
+            {scanMsg && (
+              <div style={{
+                fontSize: 12, color: scanMsg.startsWith('✓') ? t.success : t.textMuted,
+                background: t.inputBg, border: `1px solid ${t.border}`, borderRadius: 10,
+                padding: '9px 11px', marginBottom: 16, lineHeight: 1.4,
+              }}>
+                {scanMsg}
+              </div>
+            )}
 
             <button
               onClick={() => saveEditFields(true)}
