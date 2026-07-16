@@ -232,7 +232,12 @@ export async function capturePhotoAndReadDate() {
   }
 
   const photo = await Camera.takePhoto({ quality: 70, correctOrientation: true });
-  const path = photo.uri || photo.webPath;
+  // takePhoto liefert uri als reinen Dateipfad (/data/.../foto.jpg) ohne Schema.
+  // ML Kit (InputImage.fromFilePath) braucht aber eine file://-URI.
+  let path = photo.uri || photo.webPath || '';
+  if (path && !/^[a-z]+:\/\//i.test(path)) {
+    path = 'file://' + path;
+  }
   if (!path) return { date: null, text: '' };
 
   const { text } = await TextRecognition.processImage({ path });

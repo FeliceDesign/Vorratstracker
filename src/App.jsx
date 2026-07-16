@@ -789,13 +789,17 @@ export default function VorratApp() {
     setScanMsg('');
     setScanBusy(true);
     try {
-      const { date } = await capturePhotoAndReadDate();
+      const { date, text } = await capturePhotoAndReadDate();
       if (date) {
         if (target === 'edit') setEditItem((s) => ({ ...s, mhd: date }));
         else setNewItem((s) => ({ ...s, mhd: date }));
         setScanMsg('✓ Datum erkannt.');
+      } else if (text && text.trim()) {
+        // OCR hat Text gelesen, aber kein Datum erkannt -> Ausschnitt zeigen
+        const snippet = text.trim().replace(/\s+/g, ' ').slice(0, 45);
+        setScanMsg(`Kein Datum erkannt (gelesen: „${snippet}…"). Näher rangehen und nur das Datum fotografieren.`);
       } else {
-        setScanMsg('Kein Datum erkannt – bitte manuell eintragen oder erneut fotografieren.');
+        setScanMsg('Kein Text erkannt – Etikett schärfer/näher fotografieren.');
       }
     } catch (e) {
       setScanMsg(e?.message || 'Foto-Erkennung fehlgeschlagen.');
